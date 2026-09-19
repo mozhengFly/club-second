@@ -1,0 +1,41 @@
+name: 每日签到
+
+on:
+  # 每天北京时间 06:00 执行（UTC+8，对应 UTC 前一天 22:00）
+  schedule:
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+# 需要配置的 Secrets（Settings -> Secrets and variables -> Actions）：
+#   CLUB_BUNDLE_KEY  解密 check-in.bundle.zip 所用密钥，64 位 hex（必填）
+#   CLUB_ENV         运行 check-in.bundle.js 所需的环境配置（必填）
+jobs:
+  sign-in:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: 打印执行服务器 IP
+        run: |
+          IP=$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me/ip)
+          echo "当前执行任务服务器 IP: ${IP:-获取失败}"
+
+      - name: 解密 check-in bundle
+        env:
+          CLUB_BUNDLE_KEY: ${{ secrets.CLUB_BUNDLE_KEY }}
+        run: node crypto.bundle.js decrypt check-in.bundle.zip --secret "$CLUB_BUNDLE_KEY"
+
+      - name: 执行签到
+        env:
+          CLUB_ENV: ${{ secrets.CLUB_ENV }}
+        run: node check-in.bundle.js
+
+      - name: 打印签到结果
+        run: node check-in.bundle.js --print-table
