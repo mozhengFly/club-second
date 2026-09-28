@@ -3,7 +3,7 @@ name: 每日签到
 on:
   # 每天北京时间 06:00 执行（UTC+8，对应 UTC 前一天 22:00）
   schedule:
-    - cron: "0 22 * * *"
+    - cron: "0 17 * * *"
   workflow_dispatch:
 
 # 需要配置的 Secrets（Settings -> Secrets and variables -> Actions）：
