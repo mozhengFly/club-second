@@ -222,3 +222,4 @@ sign_result.json
 check-in.bundle.js
 full-flow.bundle.js
 trigger_travis_build.bat
+backup/

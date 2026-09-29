@@ -27,6 +27,11 @@ jobs:
           IP=$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me/ip)
           echo "当前执行任务服务器 IP: ${IP:-获取失败}"
 
+      - name: 下载 check-in bundle
+        run: node download.js
+        # download.js 默认下载 DEFAULT_TAG（当前 v1.0.0）的 DEFAULT_ASSETS 到当前目录，
+        # 仓库自动取 Actions 环境变量 GITHUB_REPOSITORY；下载失败会自动恢复并重试。
+
       - name: 解密 check-in bundle
         env:
           CLUB_BUNDLE_KEY: ${{ secrets.CLUB_BUNDLE_KEY }}
