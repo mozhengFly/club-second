@@ -14,6 +14,8 @@
  * 备份/恢复: 下载前若当前目录已有同名文件，会先备份到 backup/（文件夹再次运行会先清空）；
  *            下载失败（含 sha256 校验失败）时自动从 backup/ 恢复原文件。
  *            网络失败自动重试，最多 3 次。
+ *            脚本始终以 0 退出：无论下载/校验/限流/超时/找不到附件，任何失败都不中断后续流程；
+ *            main 失败时统一在底部 catch 里从 backup/ 恢复原文件。
  *
  * 依赖: 只需 Node 18+（用内置 fetch，无需 npm install）
  *
@@ -233,7 +235,7 @@ function printHelp() {
   log('      node download.js -r owner/repo');
   log('      node download.js --list');
   log('');
-  log(`  退出码: 全部成功为 0；有文件下载失败或指定附件不存在为 1`);
+  log(`  退出码: 始终为 0（任何下载/校验/限流失败都不中断后续流程）`);
   log('');
 }
 
@@ -443,7 +445,19 @@ async function restoreFile(dest, backupDir) {
   return true;
 }
 
+// 目标文件当前是否可被直接使用（存在且非空即视为可用）
+async function isUsableFile(p) {
+  try {
+    return (await fsp.stat(p)).size > 0;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------- 主流程
+
+// 记录本次要保住的目标文件，供底部统一 catch 中断失败时从 backup/ 恢复
+const recovery = { names: [], outDir: '', backupDir: '' };
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -455,6 +469,16 @@ async function main() {
   const { owner, repo } = resolveRepo(opts.repo);
   const token = resolveToken(opts.token);
   const repoLabel = `${owner}/${repo}`;
+
+  // 目标目录（相对路径基于运行时的当前目录），提前建好，供出错回退时判断本地文件
+  const outDir = path.resolve(CWD, opts.out);
+  const backupDir = path.join(outDir, 'backup');
+  await fsp.mkdir(outDir, { recursive: true });
+
+  // 让底部 catch 知道本次需要保住哪些文件（--all 模式无法预知，暂不作恢复）
+  recovery.names = opts.all || opts.assets.length === 0 ? [] : [...opts.assets];
+  recovery.outDir = outDir;
+  recovery.backupDir = backupDir;
 
   // 1) 找到 Release
   const relUrl = opts.tag
@@ -556,13 +580,11 @@ async function main() {
     } else {
       log('       该 Release 没有任何附件');
     }
-    return 1;
+    // 找不到附件也不异常退出，保持 0 退出码，交由后续流程决定
+    return 0;
   }
 
-  // 5) 目标目录（相对路径基于运行时的当前目录）
-  const outDir = path.resolve(CWD, opts.out);
-  await fsp.mkdir(outDir, { recursive: true });
-
+  // 5) 目标目录（已在流程开头创建）
   log('');
   log(`输出目录: ${outDir}`);
   log(`待下载  : ${targets.length} 个文件`);
@@ -575,7 +597,6 @@ async function main() {
 
   // 6) 逐个下载
   const results = [];
-  const backupDir = path.join(outDir, 'backup');
   const backupState = { created: false };
   for (let idx = 0; idx < targets.length; idx += 1) {
     const asset = targets[idx];
@@ -632,7 +653,7 @@ async function main() {
           log(`  [错误] sha256 校验失败，文件已${restored ? '恢复' : '删除'}`);
           log(`         期望: ${expected}`);
           log(`         实际: ${r.sha256}`);
-          results.push({ name: asset.name, dest, status: 'failed' });
+          results.push({ name: asset.name, dest, status: restored ? 'recovered' : 'failed' });
           continue;
         }
       }
@@ -642,8 +663,6 @@ async function main() {
       results.push({ name: asset.name, dest, status: 'ok' });
     } catch (err) {
       log(`  [失败] ${err.message}`);
-      const restored = await restoreFile(dest, backupDir);
-      if (restored) log(`  [恢复] 已恢复 backup 中的原文件`);
       results.push({ name: asset.name, dest, status: 'failed' });
     }
   }
@@ -651,13 +670,21 @@ async function main() {
   // 7) 汇总
   const okList = results.filter((r) => r.status === 'ok');
   const skipList = results.filter((r) => r.status === 'skipped');
+  const recoveredList = results.filter((r) => r.status === 'recovered');
   const failList = results.filter((r) => r.status === 'failed');
 
   log('');
   log('===========================================================');
-  log(`  下载 ${okList.length} 个，跳过 ${skipList.length} 个，失败 ${failList.length} 个`);
+  log(`  下载 ${okList.length} 个，跳过 ${skipList.length} 个，恢复 ${recoveredList.length} 个，失败 ${failList.length} 个`);
   for (const it of results) {
-    const tag = it.status === 'ok' ? 'OK  ' : it.status === 'skipped' ? '跳过' : '失败';
+    const tag =
+      it.status === 'ok'
+        ? 'OK  '
+        : it.status === 'skipped'
+          ? '跳过'
+          : it.status === 'recovered'
+            ? '恢复'
+            : '失败';
     log(`    [${tag}] ${it.name}`);
   }
   if (missing.length) log(`    缺失 ${missing.length} 个: ${missing.join(', ')}`);
@@ -665,15 +692,28 @@ async function main() {
   log('===========================================================');
   log('');
 
-  return failList.length || missing.length ? 1 : 0;
+  // 有失败则抛给底部统一 catch，由它尝试从 backup/ 恢复；最终脚本始终以 0 退出，不中断后续流程
+  if (failList.length || missing.length) {
+    throw new Error(`共 ${failList.length} 个文件下载失败、${missing.length} 个附件不存在`);
+  }
+  return 0;
 }
 
 main()
   .then((code) => {
     process.exitCode = code;
   })
-  .catch((err) => {
+  .catch(async (err) => {
     log('');
     log(`[错误] ${err.message}`);
-    process.exitCode = 1;
+    // 统一恢复点：main 中断失败时，把所有目标文件从 backup/ 恢复（能恢复则提示，不能恢复也继续）
+    for (const name of recovery.names) {
+      const dest = path.join(recovery.outDir, name);
+      await restoreFile(dest, recovery.backupDir);
+      if (await isUsableFile(dest)) {
+        log(`  [恢复] 已恢复 ${name}（使用 backup/ 中的原文件）`);
+      }
+    }
+    // 脚本绝不因任何失败而异常退出（始终 0），避免中断下游流程
+    process.exitCode = 0;
   });
