@@ -28,6 +28,8 @@ jobs:
           echo "当前执行任务服务器 IP: ${IP:-获取失败}"
 
       - name: 下载 check-in bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node download.js --repo mozhengFly/club --tag v1.0.0
         # 从 mozhengFly/club 仓库的 v1.0.0 release 下载默认附件（check-in.bundle.zip）到当前目录；
         # 明确指定 --repo（不取本仓库 GITHUB_REPOSITORY），下载失败会自动恢复并重试。
